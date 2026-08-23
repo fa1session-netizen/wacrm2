@@ -102,8 +102,35 @@ export function Step3Personalize({
       ]);
       if (cancelled) return;
 
-      setCustomFields(fieldsRes.data ?? []);
+      const loadedFields = fieldsRes.data ?? [];
+      setCustomFields(loadedFields);
       setLoadingFields(false);
+
+      if (loadedFields.length > 0) {
+        const matches = template.body_text.match(/\{\{(\d+)\}\}/g);
+        const placeholderList = matches ? [...new Set(matches)].sort() : [];
+        
+        const newVars = { ...variables };
+        let updated = false;
+
+        placeholderList.forEach((placeholder, idx) => {
+          const key = placeholder.replace(/^\{\{|\}\}$/g, '');
+          if (!newVars[key] || (!newVars[key].value && newVars[key].type === 'static')) {
+            const targetField = loadedFields[idx] || loadedFields[0];
+            if (targetField) {
+              newVars[key] = {
+                type: 'custom_field',
+                value: targetField.id,
+              };
+              updated = true;
+            }
+          }
+        });
+
+        if (updated) {
+          onUpdate(newVars);
+        }
+      }
 
       const contact = contactRes.data ?? null;
       setFirstContact(contact);
