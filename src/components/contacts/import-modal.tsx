@@ -226,31 +226,33 @@ export function ImportModal({
       const { unique, duplicates: inFileDupes } = dedupeByPhone(parsedRows);
       skipped += inFileDupes;
 
-      // 2) Skip numbers already in this account. One read of the
-      //    generated `phone_normalized` column (migration 022) → Set.
+      // 2) Look up existing contacts in this account to update their custom fields/tags
       const { data: existingRows } = await supabase
         .from('contacts')
-        .select('phone_normalized')
+        .select('id, phone_normalized')
         .eq('account_id', accountId);
-      const existing = new Set(
-        (existingRows ?? [])
-          .map(
-            (r) => (r as { phone_normalized: string | null }).phone_normalized
-          )
-          .filter((p): p is string => !!p)
-      );
-
-      const toInsert = unique.filter((row) => {
-        if (existing.has(normalizeKey(row.phone))) {
-          skipped++;
-          return false;
-        }
-        return true;
+      const existingMap = new Map<string, string>();
+      (existingRows ?? []).forEach((r) => {
+        const norm = (r as { id: string; phone_normalized: string | null }).phone_normalized;
+        if (norm) existingMap.set(norm, r.id);
       });
 
+      const toInsert: ParsedContactRow[] = [];
+      const existingToProcess: { contactId: string; row: ParsedContactRow }[] = [];
+
+      for (const row of unique) {
+        const normKey = normalizeKey(row.phone);
+        const existingId = existingMap.get(normKey);
+        if (existingId) {
+          existingToProcess.push({ contactId: existingId, row });
+          skipped++;
+        } else {
+          toInsert.push(row);
+        }
+      }
+
       // 3) Resolve tag names → ids (admin+ may auto-create missing tags).
-      //    Skip the round-trip when the import carries no tag names.
-      const allTagNames = toInsert.flatMap((row) => row.tagNames);
+      const allTagNames = unique.flatMap((row) => row.tagNames);
       let tagIdByKey = new Map<string, string>();
       let skippedNames: string[] = [];
       if (allTagNames.length > 0) {
@@ -265,8 +267,9 @@ export function ImportModal({
       // Fetch account custom field definitions to map extra CSV columns
       const { data: customFieldDefs } = await supabase
         .from('custom_fields')
-        .select('id, field_name');
-      
+        .select('id, field_name')
+        .eq('account_id', accountId);
+
       const customFieldIdByName = new Map<string, string>();
       (customFieldDefs ?? []).forEach((f) => {
         const rawName = f.field_name.trim().toLowerCase();
@@ -275,6 +278,45 @@ export function ImportModal({
         customFieldIdByName.set(rawName.replace(/_/g, ' '), f.id);
       });
 
+      // Auto-create any missing custom fields for this account
+      const missingFieldNames = new Set<string>();
+      unique.forEach((r) => {
+        if (r.customValues) {
+          Object.keys(r.customValues).forEach((col) => {
+            const key = col.trim().toLowerCase();
+            if (
+              !customFieldIdByName.has(key) &&
+              !customFieldIdByName.has(key.replace(/\s+/g, '_')) &&
+              !customFieldIdByName.has(key.replace(/_/g, ' '))
+            ) {
+              missingFieldNames.add(col.trim());
+            }
+          });
+        }
+      });
+
+      if (missingFieldNames.size > 0 && accountId && user?.id) {
+        for (const colName of Array.from(missingFieldNames)) {
+          const { data: newField } = await supabase
+            .from('custom_fields')
+            .insert({
+              account_id: accountId,
+              user_id: user.id,
+              field_name: colName,
+              field_type: 'text',
+            })
+            .select('id, field_name')
+            .single();
+
+          if (newField) {
+            const rawName = newField.field_name.trim().toLowerCase();
+            customFieldIdByName.set(rawName, newField.id);
+            customFieldIdByName.set(rawName.replace(/\s+/g, '_'), newField.id);
+            customFieldIdByName.set(rawName.replace(/_/g, ' '), newField.id);
+          }
+        }
+      }
+
       const tagAssignments: ContactTagAssignment[] = [];
       const customValueRows: { contact_id: string; custom_field_id: string; value: string }[] = [];
 
@@ -282,7 +324,10 @@ export function ImportModal({
         if (!rowCustomValues) return;
         Object.entries(rowCustomValues).forEach(([colName, val]) => {
           const key = colName.trim().toLowerCase();
-          const matchedId = customFieldIdByName.get(key) || customFieldIdByName.get(key.replace(/\s+/g, '_')) || customFieldIdByName.get(key.replace(/_/g, ' '));
+          const matchedId =
+            customFieldIdByName.get(key) ||
+            customFieldIdByName.get(key.replace(/\s+/g, '_')) ||
+            customFieldIdByName.get(key.replace(/_/g, ' '));
           if (matchedId && val.trim()) {
             customValueRows.push({
               contact_id: contactId,
@@ -293,9 +338,18 @@ export function ImportModal({
         });
       }
 
-      // 4) Batch insert the genuinely-new rows in chunks of 50. The DB
-      //    unique index is the backstop: a 23505 (race, or a format
-      //    that normalizes equal) counts as skipped, not failed.
+      // Collect custom field values and tags for existing contacts
+      for (const { contactId, row } of existingToProcess) {
+        if (row.tagNames.length > 0) {
+          tagAssignments.push({
+            contactId,
+            tagNames: row.tagNames,
+          });
+        }
+        collectCustomValues(contactId, row.customValues);
+      }
+
+      // 4) Batch insert the genuinely-new rows in chunks of 50.
       const chunkSize = 50;
 
       for (let i = 0; i < toInsert.length; i += chunkSize) {
@@ -315,8 +369,6 @@ export function ImportModal({
           .select('id');
 
         if (error) {
-          // Retry individually so one bad/duplicate row doesn't sink
-          // the whole chunk.
           for (let j = 0; j < rows.length; j++) {
             const row = rows[j];
             const source = chunk[j];
@@ -344,9 +396,6 @@ export function ImportModal({
         } else {
           const inserted = data ?? [];
           imported += inserted.length;
-          // inserted[j] ↔ chunk[j] only holds because a single INSERT
-          // preserves RETURNING order. If this path is ever split into
-          // parallel inserts, zip by phone or returned id instead.
           for (let j = 0; j < inserted.length; j++) {
             const source = chunk[j];
             if (!source) continue;
@@ -361,7 +410,7 @@ export function ImportModal({
         }
       }
 
-      // Save custom field values for imported contacts
+      // Save custom field values for both existing and newly imported contacts
       if (customValueRows.length > 0) {
         await supabase
           .from('contact_custom_values')

@@ -41,6 +41,19 @@ export interface ParseContactCsvResult {
   hasCompanyColumn: boolean;
 }
 
+function cleanPhoneValue(raw: string): string {
+  let str = raw.replace(/["']/g, '').trim();
+  if (/^\d+(\.\d+)?[eE]\+\d+$/i.test(str)) {
+    try {
+      const num = Number(str);
+      if (!isNaN(num) && isFinite(num)) {
+        str = num.toFixed(0);
+      }
+    } catch {}
+  }
+  return str;
+}
+
 export function parseContactCsv(text: string): ParseContactCsvResult {
   const lines = text.trim().split(/\r?\n/);
   if (lines.length < 2) {
@@ -69,7 +82,7 @@ export function parseContactCsv(text: string): ParseContactCsvResult {
     if (!line) continue;
 
     const values = parseCsvLine(line);
-    const phone = values[phoneIdx]?.replace(/["']/g, '').trim();
+    const phone = cleanPhoneValue(values[phoneIdx] || '');
     if (!phone) continue;
 
     const customValues: Record<string, string> = {};
