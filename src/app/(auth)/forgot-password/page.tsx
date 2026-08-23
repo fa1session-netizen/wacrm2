@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -16,11 +17,31 @@ import {
 import { MessageSquare, CheckCircle, ArrowLeft } from "lucide-react";
 
 export default function ForgotPasswordPage() {
+  return (
+    <Suspense fallback={null}>
+      <ForgotPasswordInner />
+    </Suspense>
+  );
+}
+
+function ForgotPasswordInner() {
+  const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
   const supabase = createClient();
+
+  useEffect(() => {
+    const errParam = searchParams.get("error") || searchParams.get("error_description");
+    const errCode = searchParams.get("error_code");
+
+    if (errCode === "otp_expired" || errParam?.includes("otp_expired") || errParam?.includes("expired")) {
+      setError("Email link is invalid or has expired. Please enter your email below to request a new password reset link.");
+    } else if (errParam) {
+      setError(errParam);
+    }
+  }, [searchParams]);
 
   const handleReset = async (e: React.FormEvent) => {
     e.preventDefault();

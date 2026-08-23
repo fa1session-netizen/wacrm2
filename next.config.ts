@@ -138,15 +138,19 @@ const nextConfig: NextConfig = {
     return [
       {
         source: "/api/:path*",
-        headers: [{ key: "Cache-Control", value: "no-store" }],
+        headers: [{ key: "Cache-Control", value: "no-store, must-revalidate" }],
       },
       {
-        source: "/:path((?!_next/static|_next/image|api).*)",
+        source: "/:path((?!_next/static|_next/image).*)",
         headers: [
           {
             key: "Cache-Control",
             value:
-              "public, max-age=0, s-maxage=300, stale-while-revalidate=86400",
+              "private, no-cache, no-store, max-age=0, must-revalidate",
+          },
+          {
+            key: "Vary",
+            value: "RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Url",
           },
         ],
       },
