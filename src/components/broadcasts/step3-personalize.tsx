@@ -215,7 +215,9 @@ export function Step3Personalize({
           };
           replacement = fieldMap[mapping.value] ?? placeholder;
         } else if (mapping.type === 'custom_field' && mapping.value) {
-          replacement = customValues.get(mapping.value) || placeholder;
+          const fieldDef = customFields.find((f) => f.id === mapping.value);
+          const val = customValues.get(mapping.value);
+          replacement = val || (fieldDef ? `[${fieldDef.field_name}]` : placeholder);
         }
       }
       text = text.replaceAll(placeholder, replacement);
@@ -227,6 +229,7 @@ export function Step3Personalize({
     placeholders,
     firstContact,
     firstContactCustomValues,
+    customFields,
   ]);
 
   const previewLabel = firstContact
@@ -373,15 +376,14 @@ export function Step3Personalize({
                         }
                       >
                         <SelectTrigger className="w-full border-border bg-muted text-foreground">
-                          <SelectValue
-                            placeholder={
-                              loadingFields
+                          <SelectValue>
+                            {customFields.find((f) => f.id === mapping.value)?.field_name ||
+                              (loadingFields
                                 ? 'Loading…'
                                 : customFields.length === 0
                                   ? 'No custom fields'
-                                  : 'Select custom field…'
-                            }
-                          />
+                                  : 'Select custom field…')}
+                          </SelectValue>
                         </SelectTrigger>
                         <SelectContent className="border-border bg-popover">
                           {customFields.map((f) => (
