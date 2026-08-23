@@ -66,8 +66,20 @@ describe('parseContactCsv', () => {
           email: undefined,
           company: undefined,
           tagNames: [],
+          customValues: undefined,
         },
       ],
+    });
+  });
+
+  it('captures custom field columns into customValues map', () => {
+    const csv = `phone,name,due_amount,fee_type
++15551234567,Alice,150.00,Tuition`;
+
+    const result = parseContactCsv(csv);
+    expect(result.rows[0].customValues).toEqual({
+      due_amount: '150.00',
+      fee_type: 'Tuition',
     });
   });
 });

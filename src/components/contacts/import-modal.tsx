@@ -262,7 +262,36 @@ export function ImportModal({
         }));
       }
 
+      // Fetch account custom field definitions to map extra CSV columns
+      const { data: customFieldDefs } = await supabase
+        .from('custom_fields')
+        .select('id, field_name');
+      
+      const customFieldIdByName = new Map<string, string>();
+      (customFieldDefs ?? []).forEach((f) => {
+        const rawName = f.field_name.trim().toLowerCase();
+        customFieldIdByName.set(rawName, f.id);
+        customFieldIdByName.set(rawName.replace(/\s+/g, '_'), f.id);
+        customFieldIdByName.set(rawName.replace(/_/g, ' '), f.id);
+      });
+
       const tagAssignments: ContactTagAssignment[] = [];
+      const customValueRows: { contact_id: string; custom_field_id: string; value: string }[] = [];
+
+      function collectCustomValues(contactId: string, rowCustomValues?: Record<string, string>) {
+        if (!rowCustomValues) return;
+        Object.entries(rowCustomValues).forEach(([colName, val]) => {
+          const key = colName.trim().toLowerCase();
+          const matchedId = customFieldIdByName.get(key) || customFieldIdByName.get(key.replace(/\s+/g, '_')) || customFieldIdByName.get(key.replace(/_/g, ' '));
+          if (matchedId && val.trim()) {
+            customValueRows.push({
+              contact_id: contactId,
+              custom_field_id: matchedId,
+              value: val.trim(),
+            });
+          }
+        });
+      }
 
       // 4) Batch insert the genuinely-new rows in chunks of 50. The DB
       //    unique index is the backstop: a 23505 (race, or a format
@@ -305,6 +334,7 @@ export function ImportModal({
                   tagNames: source.tagNames,
                 });
               }
+              collectCustomValues(singleData.id, source.customValues);
             } else if (isUniqueViolation(singleErr)) {
               skipped++;
             } else {
@@ -319,13 +349,23 @@ export function ImportModal({
           // parallel inserts, zip by phone or returned id instead.
           for (let j = 0; j < inserted.length; j++) {
             const source = chunk[j];
-            if (!source || source.tagNames.length === 0) continue;
-            tagAssignments.push({
-              contactId: inserted[j].id,
-              tagNames: source.tagNames,
-            });
+            if (!source) continue;
+            if (source.tagNames.length > 0) {
+              tagAssignments.push({
+                contactId: inserted[j].id,
+                tagNames: source.tagNames,
+              });
+            }
+            collectCustomValues(inserted[j].id, source.customValues);
           }
         }
+      }
+
+      // Save custom field values for imported contacts
+      if (customValueRows.length > 0) {
+        await supabase
+          .from('contact_custom_values')
+          .upsert(customValueRows, { onConflict: 'contact_id,custom_field_id' });
       }
 
       // 5) Wire tags onto the contacts we just created. Failure here must

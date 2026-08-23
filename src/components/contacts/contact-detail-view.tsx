@@ -318,6 +318,7 @@ export function ContactDetailView({
       }
 
       toast.success(t('toastCustomFieldsSaved'));
+      onUpdated();
     } catch {
       toast.error(t('toastCustomFieldsFailed'));
     }

@@ -10,6 +10,8 @@ export interface ParsedContactRow {
   company?: string;
   /** Tag names from the optional `tags` column (comma/semicolon separated). */
   tagNames: string[];
+  /** Values from any non-standard columns (e.g. custom contact fields). Keyed by column header. */
+  customValues?: Record<string, string>;
 }
 
 /** Split a CSV cell into unique tag names (case-insensitive de-dupe). */
@@ -45,9 +47,8 @@ export function parseContactCsv(text: string): ParseContactCsvResult {
     return { rows: [], hasTagsColumn: false, hasCompanyColumn: false };
   }
 
-  const headers = lines[0]
-    .split(',')
-    .map((h) => h.trim().toLowerCase().replace(/["']/g, ''));
+  const rawHeaders = parseCsvLine(lines[0]).map((h) => h.replace(/["']/g, '').trim());
+  const headers = rawHeaders.map((h) => h.toLowerCase());
 
   const phoneIdx = headers.indexOf('phone');
   if (phoneIdx === -1) {
@@ -59,6 +60,8 @@ export function parseContactCsv(text: string): ParseContactCsvResult {
   const companyIdx = headers.indexOf('company');
   const tagsIdx = headers.indexOf('tags');
 
+  const standardIndices = new Set([phoneIdx, nameIdx, emailIdx, companyIdx, tagsIdx]);
+
   const rows: ParsedContactRow[] = [];
 
   for (let i = 1; i < lines.length; i++) {
@@ -68,6 +71,21 @@ export function parseContactCsv(text: string): ParseContactCsvResult {
     const values = parseCsvLine(line);
     const phone = values[phoneIdx]?.replace(/["']/g, '').trim();
     if (!phone) continue;
+
+    const customValues: Record<string, string> = {};
+    headers.forEach((h, idx) => {
+      if (!standardIndices.has(idx) && h) {
+        const val = values[idx]?.replace(/["']/g, '').trim();
+        if (val) {
+          customValues[h] = val;
+          // Also save under rawHeader name if different
+          const rawH = rawHeaders[idx];
+          if (rawH && rawH !== h) {
+            customValues[rawH] = val;
+          }
+        }
+      }
+    });
 
     rows.push({
       phone,
@@ -85,6 +103,7 @@ export function parseContactCsv(text: string): ParseContactCsvResult {
           : undefined,
       tagNames:
         tagsIdx >= 0 ? parseTagCell(values[tagsIdx]?.replace(/["']/g, '')) : [],
+      customValues: Object.keys(customValues).length > 0 ? customValues : undefined,
     });
   }
 

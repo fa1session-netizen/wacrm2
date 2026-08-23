@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { toast } from 'sonner';
-import type { Contact, Tag, ContactTag } from '@/types';
+import type { Contact, Tag, ContactTag, CustomField } from '@/types';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -96,12 +96,24 @@ export default function ContactsPage() {
 
   // All tags for display
   const [tagsMap, setTagsMap] = useState<Record<string, Tag>>({});
+  // All custom fields for display
+  const [customFields, setCustomFields] = useState<CustomField[]>([]);
+  // Contact ID -> (Custom Field ID -> Value)
+  const [customValuesMap, setCustomValuesMap] = useState<Record<string, Record<string, string>>>({});
 
   // Guards against out-of-order fetch responses: each fetchContacts run
   // claims a sequence number and only the latest is allowed to commit its
   // results. Without this, rapidly toggling tag filters could let a slower
   // earlier request resolve last and render stale rows.
   const fetchSeq = useRef(0);
+
+  const fetchCustomFields = useCallback(async () => {
+    const { data } = await supabase
+      .from('custom_fields')
+      .select('*')
+      .order('field_name');
+    setCustomFields(data ?? []);
+  }, [supabase]);
 
   const fetchTags = useCallback(async () => {
     const { data } = await supabase.from('tags').select('*');
@@ -180,6 +192,7 @@ export default function ContactsPage() {
 
     if (contactRows.length === 0) {
       setContacts([]);
+      setCustomValuesMap({});
       setLoading(false);
       return;
     }
@@ -191,6 +204,20 @@ export default function ContactsPage() {
       .select('contact_id, tag_id')
       .in('contact_id', contactIds);
     if (seq !== fetchSeq.current) return; // superseded by a newer fetch
+
+    // Fetch custom values for these contacts
+    const { data: valRows } = await supabase
+      .from('contact_custom_values')
+      .select('contact_id, custom_field_id, value')
+      .in('contact_id', contactIds);
+    if (seq !== fetchSeq.current) return;
+
+    const valMap: Record<string, Record<string, string>> = {};
+    valRows?.forEach((v) => {
+      if (!valMap[v.contact_id]) valMap[v.contact_id] = {};
+      valMap[v.contact_id][v.custom_field_id] = v.value ?? '';
+    });
+    setCustomValuesMap(valMap);
 
     const tagsByContact: Record<string, string[]> = {};
     contactTags?.forEach((ct) => {
@@ -209,14 +236,11 @@ export default function ContactsPage() {
     setLoading(false);
   }, [supabase, page, search, selectedTagIds, tagsMap, t]);
 
-  // Load-once-on-mount-ish data fetches. Each setter inside runs
-  // inside an async promise completion (Supabase await), not
-  // synchronously in the effect body, so the cascade the lint rule
-  // warns about doesn't apply here.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchTags();
-  }, [fetchTags]);
+    fetchCustomFields();
+  }, [fetchTags, fetchCustomFields]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -547,13 +571,21 @@ export default function ContactsPage() {
               <TableHead className="text-muted-foreground hidden lg:table-cell">{t('tableColumns.company')}</TableHead>
               <TableHead className="text-muted-foreground hidden md:table-cell">{t('tableColumns.tags')}</TableHead>
               <TableHead className="text-muted-foreground hidden lg:table-cell">{t('tableColumns.createdAt')}</TableHead>
+              {customFields.map((field) => (
+                <TableHead
+                  key={field.id}
+                  className="text-muted-foreground capitalize hidden lg:table-cell"
+                >
+                  {field.field_name}
+                </TableHead>
+              ))}
               <TableHead className="text-muted-foreground w-12" />
             </TableRow>
           </TableHeader>
           <TableBody>
             {loading ? (
               <TableRow className="border-border">
-                <TableCell colSpan={8} className="text-center py-12">
+                <TableCell colSpan={8 + customFields.length} className="text-center py-12">
                   <div className="flex flex-col items-center gap-2">
                     <Loader2 className="size-6 animate-spin text-primary" />
                     <p className="text-sm text-muted-foreground">{t('loading')}</p>
@@ -562,7 +594,7 @@ export default function ContactsPage() {
               </TableRow>
             ) : contacts.length === 0 ? (
               <TableRow className="border-border">
-                <TableCell colSpan={8} className="text-center py-12">
+                <TableCell colSpan={8 + customFields.length} className="text-center py-12">
                   <div className="flex flex-col items-center gap-2">
                     <Users className="size-8 text-muted-foreground" />
                     <p className="text-sm text-muted-foreground">
@@ -644,6 +676,16 @@ export default function ContactsPage() {
                       year: 'numeric',
                     })}
                   </TableCell>
+                  {customFields.map((field) => (
+                    <TableCell
+                      key={field.id}
+                      className="text-muted-foreground hidden lg:table-cell text-sm"
+                    >
+                      {customValuesMap[contact.id]?.[field.id] || (
+                        <span className="text-muted-foreground">-</span>
+                      )}
+                    </TableCell>
+                  ))}
                   <TableCell>
                     <DropdownMenu>
                       <DropdownMenuTrigger
@@ -764,7 +806,13 @@ export default function ContactsPage() {
       {canEditSettings && (
         <CustomFieldsManager
           open={customFieldsOpen}
-          onOpenChange={setCustomFieldsOpen}
+          onOpenChange={(nextOpen) => {
+            setCustomFieldsOpen(nextOpen);
+            if (!nextOpen) {
+              fetchCustomFields();
+              fetchContacts();
+            }
+          }}
         />
       )}
 

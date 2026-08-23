@@ -5,7 +5,7 @@ import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/hooks/use-auth';
 import { addContactTag, deleteContactTag } from '@/lib/contacts/tag-api';
 import { toast } from 'sonner';
-import type { Contact, Tag, ContactTag } from '@/types';
+import type { Contact, Tag, ContactTag, CustomField } from '@/types';
 import {
   findExistingContact,
   isExactMatch,
@@ -70,6 +70,9 @@ export function ContactForm({
   const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
   const [loadingTags, setLoadingTags] = useState(false);
 
+  const [customFields, setCustomFields] = useState<CustomField[]>([]);
+  const [customValues, setCustomValues] = useState<Record<string, string>>({});
+
   useEffect(() => {
     if (open) {
       setName(contact?.name ?? '');
@@ -79,8 +82,32 @@ export function ContactForm({
       setSelectedTagIds(contactTags.map((ct) => ct.tag_id));
       setDupMatch(null);
       fetchTags();
+      fetchCustomFields();
     }
   }, [open, contact]);
+
+  async function fetchCustomFields() {
+    const { data: fields } = await supabase
+      .from('custom_fields')
+      .select('*')
+      .order('field_name');
+    if (fields) setCustomFields(fields);
+
+    if (contact?.id) {
+      const { data: valRows } = await supabase
+        .from('contact_custom_values')
+        .select('custom_field_id, value')
+        .eq('contact_id', contact.id);
+
+      const initialValues: Record<string, string> = {};
+      (valRows ?? []).forEach((row) => {
+        initialValues[row.custom_field_id] = row.value ?? '';
+      });
+      setCustomValues(initialValues);
+    } else {
+      setCustomValues({});
+    }
+  }
 
   // Look up an existing contact with this number (new contacts only).
   // Runs on blur so we don't query on every keystroke.
@@ -190,6 +217,29 @@ export function ContactForm({
         }
         for (const tagId of toAdd) {
           await addContactTag(contactId, tagId);
+        }
+      }
+
+      // Sync custom field values
+      if (contactId && customFields.length > 0) {
+        for (const field of customFields) {
+          const val = (customValues[field.id] ?? '').trim();
+          if (val) {
+            await supabase.from('contact_custom_values').upsert(
+              {
+                contact_id: contactId,
+                custom_field_id: field.id,
+                value: val,
+              },
+              { onConflict: 'contact_id,custom_field_id' }
+            );
+          } else {
+            await supabase
+              .from('contact_custom_values')
+              .delete()
+              .eq('contact_id', contactId)
+              .eq('custom_field_id', field.id);
+          }
         }
       }
 
@@ -361,6 +411,36 @@ export function ContactForm({
               </div>
             )}
           </div>
+
+          {/* Custom Fields */}
+          {customFields.length > 0 && (
+            <div className="space-y-3 pt-3 border-t border-border">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                Custom Fields
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {customFields.map((field) => (
+                  <div key={field.id} className="space-y-1.5">
+                    <Label htmlFor={`cf-custom-${field.id}`} className="text-muted-foreground text-xs font-medium capitalize">
+                      {field.field_name}
+                    </Label>
+                    <Input
+                      id={`cf-custom-${field.id}`}
+                      value={customValues[field.id] ?? ''}
+                      onChange={(e) =>
+                        setCustomValues((prev) => ({
+                          ...prev,
+                          [field.id]: e.target.value,
+                        }))
+                      }
+                      placeholder={`Enter ${field.field_name}`}
+                      className="bg-muted border-border text-foreground h-9 text-sm placeholder:text-muted-foreground"
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <DialogFooter className="bg-popover border-border">
             <Button
