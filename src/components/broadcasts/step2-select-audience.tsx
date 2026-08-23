@@ -120,6 +120,9 @@ export function Step2SelectAudience({
       const contacts = rows.map((r) => ({
         phone: r.phone,
         ...(r.name ? { name: r.name } : {}),
+        ...(r.email ? { email: r.email } : {}),
+        ...(r.company ? { company: r.company } : {}),
+        ...(r.customValues ? { customValues: r.customValues } : {}),
       }));
 
       onUpdate({

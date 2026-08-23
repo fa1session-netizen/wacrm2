@@ -21,7 +21,13 @@ export interface AudienceConfig {
   type: 'all' | 'tags' | 'custom_field' | 'csv';
   tagIds?: string[];
   customField?: CustomFieldFilter;
-  csvContacts?: { phone: string; name?: string }[];
+  csvContacts?: {
+    phone: string;
+    name?: string;
+    email?: string;
+    company?: string;
+    customValues?: Record<string, string>;
+  }[];
   /** Contacts carrying any of these tags are subtracted from the result. */
   excludeTagIds?: string[];
 }
@@ -227,7 +233,13 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
    */
   async function upsertCsvContacts(
     supabase: ReturnType<typeof createClient>,
-    csvRows: { phone: string; name?: string }[],
+    csvRows: {
+      phone: string;
+      name?: string;
+      email?: string;
+      company?: string;
+      customValues?: Record<string, string>;
+    }[],
   ): Promise<Contact[]> {
     if (csvRows.length === 0) return [];
 
@@ -243,7 +255,16 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
     }
 
     // De-duplicate by phone within the CSV (users can paste duplicates).
-    const uniqueByPhone = new Map<string, { phone: string; name?: string }>();
+    const uniqueByPhone = new Map<
+      string,
+      {
+        phone: string;
+        name?: string;
+        email?: string;
+        company?: string;
+        customValues?: Record<string, string>;
+      }
+    >();
     for (const row of csvRows) {
       if (row.phone) uniqueByPhone.set(row.phone, row);
     }
@@ -264,16 +285,20 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       if (c.phone) byPhone.set(c.phone, c);
     }
 
-    // Insert only missing contacts, in one batch per 200 rows (PostgREST
-    // has a default payload cap — 200 keeps individual requests small).
+    // Insert only missing contacts
     const missing = phones
       .filter((p) => !byPhone.has(p))
-      .map((phone) => ({
-        user_id: user.id,
-        account_id: accountId,
-        phone,
-        name: uniqueByPhone.get(phone)?.name ?? null,
-      }));
+      .map((phone) => {
+        const row = uniqueByPhone.get(phone);
+        return {
+          user_id: user.id,
+          account_id: accountId,
+          phone,
+          name: row?.name ?? null,
+          email: row?.email ?? null,
+          company: row?.company ?? null,
+        };
+      });
 
     const INSERT_CHUNK = 200;
     for (let i = 0; i < missing.length; i += INSERT_CHUNK) {
@@ -287,6 +312,90 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       }
       for (const c of (inserted ?? []) as Contact[]) {
         if (c.phone) byPhone.set(c.phone, c);
+      }
+    }
+
+    // Process custom values if any CSV row carries customValues
+    const hasCustomValues = csvRows.some((r) => r.customValues && Object.keys(r.customValues).length > 0);
+    if (hasCustomValues && accountId) {
+      const { data: customFieldDefs } = await supabase
+        .from('custom_fields')
+        .select('id, field_name')
+        .eq('account_id', accountId);
+
+      const customFieldIdByName = new Map<string, string>();
+      (customFieldDefs ?? []).forEach((f) => {
+        const rawName = f.field_name.trim().toLowerCase();
+        customFieldIdByName.set(rawName, f.id);
+        customFieldIdByName.set(rawName.replace(/\s+/g, '_'), f.id);
+        customFieldIdByName.set(rawName.replace(/_/g, ' '), f.id);
+      });
+
+      // Auto-create missing custom fields if needed
+      const missingFieldNames = new Set<string>();
+      csvRows.forEach((r) => {
+        if (r.customValues) {
+          Object.keys(r.customValues).forEach((col) => {
+            const key = col.trim().toLowerCase();
+            if (
+              !customFieldIdByName.has(key) &&
+              !customFieldIdByName.has(key.replace(/\s+/g, '_')) &&
+              !customFieldIdByName.has(key.replace(/_/g, ' '))
+            ) {
+              missingFieldNames.add(col.trim());
+            }
+          });
+        }
+      });
+
+      if (missingFieldNames.size > 0) {
+        for (const colName of Array.from(missingFieldNames)) {
+          const { data: newField } = await supabase
+            .from('custom_fields')
+            .insert({
+              account_id: accountId,
+              user_id: user.id,
+              field_name: colName,
+              field_type: 'text',
+            })
+            .select('id, field_name')
+            .single();
+
+          if (newField) {
+            const rawName = newField.field_name.trim().toLowerCase();
+            customFieldIdByName.set(rawName, newField.id);
+            customFieldIdByName.set(rawName.replace(/\s+/g, '_'), newField.id);
+            customFieldIdByName.set(rawName.replace(/_/g, ' '), newField.id);
+          }
+        }
+      }
+
+      const customValueRows: { contact_id: string; custom_field_id: string; value: string }[] = [];
+      for (const phone of phones) {
+        const contact = byPhone.get(phone);
+        const row = uniqueByPhone.get(phone);
+        if (contact && row?.customValues) {
+          Object.entries(row.customValues).forEach(([colName, val]) => {
+            const key = colName.trim().toLowerCase();
+            const matchedId =
+              customFieldIdByName.get(key) ||
+              customFieldIdByName.get(key.replace(/\s+/g, '_')) ||
+              customFieldIdByName.get(key.replace(/_/g, ' '));
+            if (matchedId && val.trim()) {
+              customValueRows.push({
+                contact_id: contact.id,
+                custom_field_id: matchedId,
+                value: val.trim(),
+              });
+            }
+          });
+        }
+      }
+
+      if (customValueRows.length > 0) {
+        await supabase
+          .from('contact_custom_values')
+          .upsert(customValueRows, { onConflict: 'contact_id,custom_field_id' });
       }
     }
 
