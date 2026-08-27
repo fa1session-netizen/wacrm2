@@ -29,6 +29,9 @@ const h = vi.hoisted(() => ({
     }[],
     /** Error the next storage upload resolves with, if any. */
     storageUploadError: null as { message: string } | null,
+    recipientRecord: { id: 'rec-1', status: 'sent' } as { id: string; status: string } | null,
+    recipientUpdateCalls: [] as { update: Record<string, unknown>; id: string }[],
+    messageUpdateCalls: [] as { update: Record<string, unknown>; val: string }[],
   },
 }))
 
@@ -80,19 +83,35 @@ vi.mock('@supabase/supabase-js', () => ({
             }),
           }
         case 'broadcast_recipients':
-          // flagBroadcastReplyIfAny: select().eq().eq().in().order().limit()
           return {
             select: () => ({
-              eq: () => ({
-                eq: () => ({
-                  in: () => ({
-                    order: () => ({
-                      limit: () =>
-                        Promise.resolve({ data: [], error: null }),
+              eq: (col: string, _val: unknown) => {
+                if (col === 'whatsapp_message_id') {
+                  return {
+                    maybeSingle: () =>
+                      Promise.resolve({
+                        data: h.state.recipientRecord,
+                        error: null,
+                      }),
+                  }
+                }
+                return {
+                  eq: () => ({
+                    in: () => ({
+                      order: () => ({
+                        limit: () =>
+                          Promise.resolve({ data: [], error: null }),
+                      }),
                     }),
                   }),
-                }),
-              }),
+                }
+              },
+            }),
+            update: (update: Record<string, unknown>) => ({
+              eq: (_col: string, id: string) => {
+                h.state.recipientUpdateCalls.push({ update, id })
+                return Promise.resolve({ error: null })
+              },
             }),
           }
         case 'messages':
@@ -112,13 +131,20 @@ vi.mock('@supabase/supabase-js', () => ({
                         }),
                     }),
                   }
-                : // lookupInternalIdByMetaId: select('id').eq().eq().maybeSingle()
+                : // lookupInternalIdByMetaId / handleStatusUpdate fan-out lookup
                   {
                     eq: () => ({
                       eq: () => ({
                         maybeSingle: () =>
                           Promise.resolve({
                             data: h.state.replyContextParent,
+                            error: null,
+                          }),
+                      }),
+                      limit: () => ({
+                        maybeSingle: () =>
+                          Promise.resolve({
+                            data: null,
                             error: null,
                           }),
                       }),
@@ -135,6 +161,12 @@ vi.mock('@supabase/supabase-js', () => ({
                   }),
               }
             },
+            update: (update: Record<string, unknown>) => ({
+              eq: (_col: string, val: string) => {
+                h.state.messageUpdateCalls.push({ update, val })
+                return Promise.resolve({ error: null })
+              },
+            }),
           }
         default:
           throw new Error(`unexpected table: ${table}`)
@@ -260,6 +292,9 @@ beforeEach(() => {
   h.state.mirrorInboundMedia = true
   h.state.storageUploads = []
   h.state.storageUploadError = null
+  h.state.recipientRecord = { id: 'rec-1', status: 'sent' }
+  h.state.recipientUpdateCalls = []
+  h.state.messageUpdateCalls = []
   mockGetMediaUrl.mockResolvedValue({
     url: 'https://lookaside.fbsbx.com/whatsapp/abc',
     mimeType: 'image/jpeg',
@@ -536,5 +571,113 @@ describe('inbound webhook: after() awaits automations (#368)', () => {
     // If the dispatches were fire-and-forget, completed would still be 0
     // here — the callback would have resolved before the timers fired.
     expect(h.state.automationCompleted).toBe(3)
+  })
+})
+
+function statusWebhookRequest(statusObj: Record<string, unknown>) {
+  const body = {
+    entry: [
+      {
+        changes: [
+          {
+            field: 'messages',
+            value: {
+              metadata: { phone_number_id: 'pn-1' },
+              statuses: [statusObj],
+            },
+          },
+        ],
+      },
+    ],
+  }
+  return {
+    text: async () => JSON.stringify(body),
+    headers: { get: () => 'sha256=stub' },
+  } as unknown as Request
+}
+
+async function runStatusWebhook(statusObj: Record<string, unknown>) {
+  const res = await POST(statusWebhookRequest(statusObj))
+  for (const cb of h.state.afterCallbacks) await cb()
+  return res
+}
+
+describe('status webhook: Meta errors captured', () => {
+  it('captures Meta errors[] from failed status webhooks and saves error code/title/message into broadcast_recipients.error_message', async () => {
+    h.state.recipientRecord = { id: 'rec-1', status: 'sent' }
+
+    await runStatusWebhook({
+      id: 'wamid.STATUS1',
+      status: 'failed',
+      timestamp: '1700000000',
+      recipient_id: '15551230000',
+      errors: [
+        {
+          code: 131026,
+          title: 'Message undeliverable',
+          message: 'User phone number is not registered on WhatsApp',
+        },
+      ],
+    })
+
+    expect(h.state.recipientUpdateCalls).toHaveLength(1)
+    expect(h.state.recipientUpdateCalls[0]).toEqual({
+      id: 'rec-1',
+      update: {
+        status: 'failed',
+        error_message: '131026: Message undeliverable - User phone number is not registered on WhatsApp',
+      },
+    })
+  })
+
+  it('omits duplicate message text if title and message match', async () => {
+    h.state.recipientRecord = { id: 'rec-1', status: 'sent' }
+
+    await runStatusWebhook({
+      id: 'wamid.STATUS2',
+      status: 'failed',
+      timestamp: '1700000000',
+      recipient_id: '15551230000',
+      errors: [
+        {
+          code: 131026,
+          title: 'Message undeliverable',
+          message: 'Message undeliverable',
+        },
+      ],
+    })
+
+    expect(h.state.recipientUpdateCalls).toHaveLength(1)
+    expect(h.state.recipientUpdateCalls[0]).toEqual({
+      id: 'rec-1',
+      update: {
+        status: 'failed',
+        error_message: '131026: Message undeliverable',
+      },
+    })
+  })
+
+  it('joins multiple Meta errors with semicolon', async () => {
+    h.state.recipientRecord = { id: 'rec-1', status: 'sent' }
+
+    await runStatusWebhook({
+      id: 'wamid.STATUS3',
+      status: 'failed',
+      timestamp: '1700000000',
+      recipient_id: '15551230000',
+      errors: [
+        { code: 131026, title: 'Message undeliverable' },
+        { code: 131047, title: 'Re-engagement message required' },
+      ],
+    })
+
+    expect(h.state.recipientUpdateCalls).toHaveLength(1)
+    expect(h.state.recipientUpdateCalls[0]).toEqual({
+      id: 'rec-1',
+      update: {
+        status: 'failed',
+        error_message: '131026: Message undeliverable; 131047: Re-engagement message required',
+      },
+    })
   })
 })

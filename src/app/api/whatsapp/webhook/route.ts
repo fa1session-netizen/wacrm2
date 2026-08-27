@@ -91,6 +91,14 @@ interface WhatsAppWebhookEntry {
         status: string
         timestamp: string
         recipient_id: string
+        errors?: Array<{
+          code: number
+          title: string
+          message?: string
+          error_data?: {
+            details?: string
+          }
+        }>
       }>
     }
     field: string
@@ -369,6 +377,14 @@ async function handleStatusUpdate(status: {
   status: string
   timestamp: string
   recipient_id: string
+  errors?: Array<{
+    code: number
+    title: string
+    message?: string
+    error_data?: {
+      details?: string
+    }
+  }>
 }) {
   // 1) Mirror onto messages (legacy behavior) — Meta's status values
   //    already match the CHECK constraint on messages.status. No
@@ -412,6 +428,21 @@ async function handleStatusUpdate(status: {
     if (status.status === 'sent' && !('sent_at' in update)) update.sent_at = tsIso
     if (status.status === 'delivered') update.delivered_at = tsIso
     if (status.status === 'read') update.read_at = tsIso
+
+    if (status.errors && status.errors.length > 0) {
+      const errMsgs = status.errors
+        .map((e) => {
+          const codeStr = e.code !== undefined ? `${e.code}: ` : ''
+          const msgStr = e.message && e.message !== e.title ? ` - ${e.message}` : ''
+          return `${codeStr}${e.title || ''}${msgStr}`.trim()
+        })
+        .filter(Boolean)
+      if (errMsgs.length > 0) {
+        update.error_message = errMsgs.join('; ')
+      }
+    } else if (status.status === 'failed' && !update.error_message) {
+      update.error_message = 'Failed'
+    }
 
     const { error: recUpdateErr } = await supabaseAdmin()
       .from('broadcast_recipients')
