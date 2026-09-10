@@ -341,7 +341,14 @@
       "toastFailedDelete": "Failed to delete contact",
       "toastDeleted": "Contact deleted",
       "toastBulkFailedDelete": "Failed to delete contacts",
-      "toastBulkDeleted": "{count} contacts deleted"
+      "toastBulkDeleted": "{count} contacts deleted",
+      "deleteAllBtn": "Delete All",
+      "deleteAllTitle": "Delete all contacts?",
+      "deleteAllDesc": "This will permanently delete every contact in this account. This action cannot be undone.",
+      "deleteAllConfirmHint": "To confirm deletion, type DELETE ALL in the box below:",
+      "deleteAllPlaceholder": "DELETE ALL",
+      "toastDeleteAllSuccess": "Successfully deleted {count} contacts",
+      "toastDeleteAllFailed": "Failed to delete contacts"
     },
     "form": {
       "addTitle": "Add Contact",
@@ -451,10 +458,12 @@
       "moreRows": "+ {count} more row not shown",
       "moreRows_plural": "+ {count} more rows not shown",
       "importComplete": "Import complete",
+      "resultTotal": "{count} total rows",
       "resultImported": "{count} imported",
       "resultTags": "{count} tag assigned",
       "resultTags_plural": "{count} tags assigned",
-      "resultSkipped": "{count} skipped",
+      "resultSkipped": "{count} duplicates skipped",
+      "resultInvalid": "{count} invalid skipped",
       "resultFailed": "{count} failed",
       "willBeCreated": "{name} (will be created on import)",
       "columns": {
@@ -477,6 +486,8 @@
       "toastTagsSkipped": "Unknown tags skipped (create them in Settings first): {sample}{more}",
       "toastSkipped": "{count} duplicate skipped",
       "toastSkipped_plural": "{count} duplicates skipped",
+      "toastInvalidSkipped": "{count} invalid row skipped",
+      "toastInvalidSkipped_plural": "{count} invalid rows skipped",
       "toastFailed": "{count} contact failed to import",
       "toastFailed_plural": "{count} contacts failed to import",
       "toastError": "Import failed"

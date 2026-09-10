@@ -33,6 +33,8 @@ describe('parseContactCsv', () => {
     expect(parseContactCsv(csv)).toEqual({
       hasTagsColumn: true,
       hasCompanyColumn: false,
+      totalRows: 2,
+      invalidRows: 0,
       rows: [
         {
           phone: '+15551234567',
@@ -59,6 +61,8 @@ describe('parseContactCsv', () => {
     expect(parseContactCsv(csv)).toEqual({
       hasTagsColumn: false,
       hasCompanyColumn: false,
+      totalRows: 1,
+      invalidRows: 0,
       rows: [
         {
           phone: '+15551234567',
@@ -81,5 +85,17 @@ describe('parseContactCsv', () => {
       due_amount: '150.00',
       fee_type: 'Tuition',
     });
+  });
+
+  it('counts total and invalid rows correctly when phone cell is empty', () => {
+    const csv = `phone,name
++15551234567,Alice
+,NoPhone
++15559876543,Bob`;
+
+    const result = parseContactCsv(csv);
+    expect(result.totalRows).toBe(3);
+    expect(result.invalidRows).toBe(1);
+    expect(result.rows).toHaveLength(2);
   });
 });

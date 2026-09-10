@@ -140,8 +140,10 @@ export function ImportModal({
   );
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<{
+    totalRows: number;
     imported: number;
     skipped: number;
+    invalid: number;
     failed: number;
     tagsAssigned: number;
   } | null>(null);
@@ -206,7 +208,7 @@ export function ImportModal({
   }
 
   async function handleImport() {
-    if (parsedRows.length === 0) return;
+    if (!file || parsedRows.length === 0) return;
     setImporting(true);
 
     try {
@@ -218,24 +220,42 @@ export function ImportModal({
       if (!accountId)
         throw new Error('Your profile is not linked to an account.');
 
+      const text = await file.text();
+      const parseResult = parseContactCsv(text);
+
+      let totalRows = parseResult.totalRows;
+      let invalid = parseResult.invalidRows;
       let imported = 0;
       let skipped = 0;
       let failed = 0;
 
       // 1) De-dupe within the file by normalized phone (keep first).
-      const { unique, duplicates: inFileDupes } = dedupeByPhone(parsedRows);
+      const { unique, duplicates: inFileDupes, invalid: dedupeInvalid } = dedupeByPhone(parseResult.rows);
       skipped += inFileDupes;
+      invalid += dedupeInvalid;
 
-      // 2) Look up existing contacts in this account to update their custom fields/tags
-      const { data: existingRows } = await supabase
-        .from('contacts')
-        .select('id, phone_normalized')
-        .eq('account_id', accountId);
+      // 2) Query existing contacts in this account matching the normalized keys of unique CSV rows
+      const normalizedKeys = Array.from(
+        new Set(unique.map((r) => normalizeKey(r.phone)).filter(Boolean))
+      );
       const existingMap = new Map<string, string>();
-      (existingRows ?? []).forEach((r) => {
-        const norm = (r as { id: string; phone_normalized: string | null }).phone_normalized;
-        if (norm) existingMap.set(norm, r.id);
-      });
+
+      if (normalizedKeys.length > 0) {
+        const keyChunkSize = 500;
+        for (let i = 0; i < normalizedKeys.length; i += keyChunkSize) {
+          const keyChunk = normalizedKeys.slice(i, i + keyChunkSize);
+          const { data: existingRows } = await supabase
+            .from('contacts')
+            .select('id, phone_normalized')
+            .eq('account_id', accountId)
+            .in('phone_normalized', keyChunk);
+
+          (existingRows ?? []).forEach((r) => {
+            const norm = (r as { id: string; phone_normalized: string | null }).phone_normalized;
+            if (norm) existingMap.set(norm, r.id);
+          });
+        }
+      }
 
       const toInsert: ParsedContactRow[] = [];
       const existingToProcess: { contactId: string; row: ParsedContactRow }[] = [];
@@ -389,8 +409,10 @@ export function ImportModal({
               collectCustomValues(singleData.id, source.customValues);
             } else if (isUniqueViolation(singleErr)) {
               skipped++;
+              console.warn('[CSV Import] Skipped racing duplicate contact:', source.phone);
             } else {
               failed++;
+              console.error('[CSV Import] Failed to insert contact row at index', i + j, 'reason:', singleErr?.message ?? 'Unknown DB error');
             }
           }
         } else {
@@ -430,7 +452,7 @@ export function ImportModal({
         toast.warning(t('toastTagsWarning'));
       }
 
-      setResult({ imported, skipped, failed, tagsAssigned });
+      setResult({ totalRows, imported, skipped, invalid, failed, tagsAssigned });
       if (imported > 0) {
         toast.success(t('toastImported', { count: imported }));
         onImported();
@@ -446,6 +468,9 @@ export function ImportModal({
       }
       if (skipped > 0) {
         toast.info(t('toastSkipped', { count: skipped }));
+      }
+      if (invalid > 0) {
+        toast.info(t('toastInvalidSkipped', { count: invalid }));
       }
       if (failed > 0) {
         toast.error(t('toastFailed', { count: failed }));
@@ -654,29 +679,40 @@ export function ImportModal({
           )}
 
           {result && (
-            <div className="rounded-xl border border-border bg-background/50 p-4">
-              <p className="text-sm font-medium text-popover-foreground">{t('importComplete')}</p>
+            <div className="rounded-xl border border-border bg-background/50 p-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium text-popover-foreground">{t('importComplete')}</p>
+                <span className="text-xs font-mono text-muted-foreground">
+                  {t('resultTotal', { count: result.totalRows })}
+                </span>
+              </div>
               <div className="mt-3 flex flex-wrap gap-3">
                 {result.imported > 0 && (
-                  <div className="text-primary flex items-center gap-1.5 text-sm">
+                  <div className="text-primary flex items-center gap-1.5 text-sm font-medium">
                     <CheckCircle className="size-4 shrink-0" />
                     {t('resultImported', { count: result.imported })}
                   </div>
                 )}
                 {result.tagsAssigned > 0 && (
-                  <div className="flex items-center gap-1.5 text-sm text-cyan-400">
+                  <div className="flex items-center gap-1.5 text-sm text-cyan-400 font-medium">
                     <CheckCircle className="size-4 shrink-0" />
                     {t('resultTags', { count: result.tagsAssigned })}
                   </div>
                 )}
                 {result.skipped > 0 && (
-                  <div className="flex items-center gap-1.5 text-sm text-amber-400">
+                  <div className="flex items-center gap-1.5 text-sm text-amber-400 font-medium">
                     <AlertTriangle className="size-4 shrink-0" />
                     {t('resultSkipped', { count: result.skipped })}
                   </div>
                 )}
+                {result.invalid > 0 && (
+                  <div className="flex items-center gap-1.5 text-sm text-orange-400 font-medium">
+                    <AlertTriangle className="size-4 shrink-0" />
+                    {t('resultInvalid', { count: result.invalid })}
+                  </div>
+                )}
                 {result.failed > 0 && (
-                  <div className="flex items-center gap-1.5 text-sm text-red-400">
+                  <div className="flex items-center gap-1.5 text-sm text-red-400 font-medium">
                     <XCircle className="size-4 shrink-0" />
                     {t('resultFailed', { count: result.failed })}
                   </div>

@@ -39,6 +39,10 @@ export interface ParseContactCsvResult {
   hasTagsColumn: boolean;
   /** True when the CSV header includes a `company` column. */
   hasCompanyColumn: boolean;
+  /** Total data lines parsed from CSV (excluding header and blank lines). */
+  totalRows: number;
+  /** Number of data lines skipped because the phone column was empty or invalid. */
+  invalidRows: number;
 }
 
 function cleanPhoneValue(raw: string): string {
@@ -57,7 +61,7 @@ function cleanPhoneValue(raw: string): string {
 export function parseContactCsv(text: string): ParseContactCsvResult {
   const lines = text.trim().split(/\r?\n/);
   if (lines.length < 2) {
-    return { rows: [], hasTagsColumn: false, hasCompanyColumn: false };
+    return { rows: [], hasTagsColumn: false, hasCompanyColumn: false, totalRows: 0, invalidRows: 0 };
   }
 
   const rawHeaders = parseCsvLine(lines[0]).map((h) => h.replace(/["']/g, '').trim());
@@ -65,7 +69,7 @@ export function parseContactCsv(text: string): ParseContactCsvResult {
 
   const phoneIdx = headers.indexOf('phone');
   if (phoneIdx === -1) {
-    return { rows: [], hasTagsColumn: false, hasCompanyColumn: false };
+    return { rows: [], hasTagsColumn: false, hasCompanyColumn: false, totalRows: 0, invalidRows: 0 };
   }
 
   const nameIdx = headers.indexOf('name');
@@ -76,14 +80,20 @@ export function parseContactCsv(text: string): ParseContactCsvResult {
   const standardIndices = new Set([phoneIdx, nameIdx, emailIdx, companyIdx, tagsIdx]);
 
   const rows: ParsedContactRow[] = [];
+  let totalRows = 0;
+  let invalidRows = 0;
 
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
 
+    totalRows++;
     const values = parseCsvLine(line);
     const phone = cleanPhoneValue(values[phoneIdx] || '');
-    if (!phone) continue;
+    if (!phone) {
+      invalidRows++;
+      continue;
+    }
 
     const customValues: Record<string, string> = {};
     headers.forEach((h, idx) => {
@@ -124,6 +134,8 @@ export function parseContactCsv(text: string): ParseContactCsvResult {
     rows,
     hasTagsColumn: tagsIdx >= 0,
     hasCompanyColumn: companyIdx >= 0,
+    totalRows,
+    invalidRows,
   };
 }
 

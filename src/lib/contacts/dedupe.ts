@@ -82,15 +82,16 @@ export function isUniqueViolation(error: unknown): boolean {
  */
 export function dedupeByPhone<T extends { phone: string }>(
   rows: T[],
-): { unique: T[]; duplicates: number } {
+): { unique: T[]; duplicates: number; invalid: number } {
   const seen = new Set<string>();
   const unique: T[] = [];
   let duplicates = 0;
+  let invalid = 0;
 
   for (const row of rows) {
     const key = normalizeKey(row.phone);
     if (!key) {
-      duplicates++;
+      invalid++;
       continue;
     }
     if (seen.has(key)) {
@@ -101,5 +102,5 @@ export function dedupeByPhone<T extends { phone: string }>(
     unique.push(row);
   }
 
-  return { unique, duplicates };
+  return { unique, duplicates, invalid };
 }

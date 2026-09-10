@@ -55,6 +55,7 @@ import { ContactDetailView } from '@/components/contacts/contact-detail-view';
 import { ImportModal } from '@/components/contacts/import-modal';
 import { CustomFieldsManager } from '@/components/contacts/custom-fields-manager';
 import { useCan } from '@/hooks/use-can';
+import { useAuth } from '@/hooks/use-auth';
 import { GatedButton } from '@/components/ui/gated-button';
 import { useTranslations } from 'next-intl';
 
@@ -67,6 +68,7 @@ interface ContactWithTags extends Contact {
 export default function ContactsPage() {
   const t = useTranslations('Contacts.page');
   const supabase = createClient();
+  const { accountId } = useAuth();
   const canEdit = useCan('send-messages');
   const canEditSettings = useCan('edit-settings');
 
@@ -89,6 +91,11 @@ export default function ContactsPage() {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Contact | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  // Delete All Contacts
+  const [deleteAllOpen, setDeleteAllOpen] = useState(false);
+  const [deleteAllInput, setDeleteAllInput] = useState('');
+  const [deletingAll, setDeletingAll] = useState(false);
 
   // Bulk selection (page-scoped — only the loaded rows are selectable)
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -338,6 +345,53 @@ export default function ContactsPage() {
     setBulkDeleteOpen(false);
   }
 
+  async function handleDeleteAll() {
+    if (deleteAllInput.trim() !== 'DELETE ALL') return;
+    if (!accountId) {
+      toast.error(t('toastFailedLoad'));
+      return;
+    }
+
+    setDeletingAll(true);
+
+    try {
+      const { data, error } = await supabase.rpc('delete_all_account_contacts', {
+        p_account_id: accountId,
+      });
+
+      if (error) {
+        const { error: fallbackErr, count } = await supabase
+          .from('contacts')
+          .delete({ count: 'exact' })
+          .eq('account_id', accountId);
+
+        if (fallbackErr) {
+          toast.error(t('toastDeleteAllFailed'));
+        } else {
+          const deletedCount = count ?? 0;
+          toast.success(t('toastDeleteAllSuccess', { count: deletedCount }));
+          setSelected(new Set());
+          setPage(0);
+          fetchContacts();
+          setDeleteAllOpen(false);
+          setDeleteAllInput('');
+        }
+      } else {
+        const deletedCount = typeof data === 'number' ? data : 0;
+        toast.success(t('toastDeleteAllSuccess', { count: deletedCount }));
+        setSelected(new Set());
+        setPage(0);
+        fetchContacts();
+        setDeleteAllOpen(false);
+        setDeleteAllInput('');
+      }
+    } catch {
+      toast.error(t('toastDeleteAllFailed'));
+    } finally {
+      setDeletingAll(false);
+    }
+  }
+
   const totalPages = Math.ceil(totalCount / PAGE_SIZE);
   const hasNext = page < totalPages - 1;
   const hasPrev = page > 0;
@@ -402,6 +456,19 @@ export default function ContactsPage() {
           >
             <Plus className="size-4" />
             {t('addContactBtn')}
+          </GatedButton>
+          <GatedButton
+            variant="destructive"
+            canAct={canEdit}
+            gateReason="delete contacts"
+            onClick={() => {
+              setDeleteAllInput('');
+              setDeleteAllOpen(true);
+            }}
+            className="gap-1.5"
+          >
+            <Trash2 className="size-4" />
+            {t('deleteAllBtn')}
           </GatedButton>
         </div>
       </div>
@@ -871,6 +938,62 @@ export default function ContactsPage() {
             >
               {deleting && <Loader2 className="size-4 animate-spin" />}
               {t('deleteBtn')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete All Contacts Confirmation Modal */}
+      <Dialog
+        open={deleteAllOpen}
+        onOpenChange={(open) => {
+          setDeleteAllOpen(open);
+          if (!open) setDeleteAllInput('');
+        }}
+      >
+        <DialogContent className="bg-popover border-border text-popover-foreground sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-destructive flex items-center gap-2 text-lg">
+              <Trash2 className="size-5 shrink-0" />
+              {t('deleteAllTitle')}
+            </DialogTitle>
+            <DialogDescription className="text-muted-foreground leading-relaxed pt-2">
+              {t('deleteAllDesc')}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3 py-2">
+            <p className="text-xs font-medium text-foreground">
+              {t('deleteAllConfirmHint')}
+            </p>
+            <Input
+              value={deleteAllInput}
+              onChange={(e) => setDeleteAllInput(e.target.value)}
+              placeholder={t('deleteAllPlaceholder')}
+              className="bg-card border-border text-foreground font-mono"
+              autoComplete="off"
+            />
+          </div>
+
+          <DialogFooter className="bg-popover border-border gap-2 sm:justify-end">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setDeleteAllOpen(false);
+                setDeleteAllInput('');
+              }}
+              disabled={deletingAll}
+              className="border-border text-muted-foreground hover:bg-muted"
+            >
+              {t('cancel')}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDeleteAll}
+              disabled={deleteAllInput.trim() !== 'DELETE ALL' || deletingAll}
+            >
+              {deletingAll && <Loader2 className="size-4 animate-spin" />}
+              {t('deleteAllBtn')}
             </Button>
           </DialogFooter>
         </DialogContent>

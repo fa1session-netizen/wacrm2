@@ -47,22 +47,24 @@ describe("isUniqueViolation", () => {
 
 describe("dedupeByPhone", () => {
   it("keeps the first occurrence and counts in-file duplicates", () => {
-    const { unique, duplicates } = dedupeByPhone([
+    const { unique, duplicates, invalid } = dedupeByPhone([
       { phone: "+1 555-1111", name: "A" },
       { phone: "15551111", name: "B" }, // same digits as #1
       { phone: "+1 555-2222", name: "C" },
     ]);
     expect(unique.map((r) => r.name)).toEqual(["A", "C"]);
     expect(duplicates).toBe(1);
+    expect(invalid).toBe(0);
   });
 
-  it("drops rows with no digits", () => {
-    const { unique, duplicates } = dedupeByPhone([
+  it("drops rows with no digits as invalid", () => {
+    const { unique, duplicates, invalid } = dedupeByPhone([
       { phone: "   " },
       { phone: "+1 555-3333" },
     ]);
     expect(unique).toHaveLength(1);
-    expect(duplicates).toBe(1);
+    expect(duplicates).toBe(0);
+    expect(invalid).toBe(1);
   });
 });
 
