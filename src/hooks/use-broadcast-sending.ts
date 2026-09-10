@@ -7,6 +7,7 @@ import {
   BATCH_SEND_ATTEMPTS,
   batchRetryDelayMs,
 } from '@/lib/broadcast-retry';
+import { isUniqueViolation, normalizeKey } from '@/lib/contacts/dedupe';
 import { Contact, MessageTemplate } from '@/types';
 
 export type CustomFieldOperator = 'is' | 'is_not' | 'contains';
@@ -254,8 +255,8 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       throw new Error('Your profile is not linked to an account.');
     }
 
-    // De-duplicate by phone within the CSV (users can paste duplicates).
-    const uniqueByPhone = new Map<
+    // De-duplicate by normalized phone within the CSV (users can paste duplicates).
+    const uniqueByNormKey = new Map<
       string,
       {
         phone: string;
@@ -265,53 +266,96 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
         customValues?: Record<string, string>;
       }
     >();
+    const orderedNormKeys: string[] = [];
+
     for (const row of csvRows) {
-      if (row.phone) uniqueByPhone.set(row.phone, row);
-    }
-    const phones = [...uniqueByPhone.keys()];
-
-    // Single round-trip lookup of existing contacts by phone.
-    const { data: existing, error: lookupErr } = await supabase
-      .from('contacts')
-      .select('*')
-      .eq('user_id', user.id)
-      .in('phone', phones);
-    if (lookupErr) {
-      throw new Error(`Failed to look up CSV contacts: ${lookupErr.message}`);
+      if (!row.phone) continue;
+      const key = normalizeKey(row.phone);
+      if (!key) continue;
+      if (!uniqueByNormKey.has(key)) {
+        uniqueByNormKey.set(key, row);
+        orderedNormKeys.push(key);
+      }
     }
 
-    const byPhone = new Map<string, Contact>();
-    for (const c of (existing ?? []) as Contact[]) {
-      if (c.phone) byPhone.set(c.phone, c);
+    if (orderedNormKeys.length === 0) return [];
+
+    // Single round-trip lookup of existing contacts by phone_normalized in accountId
+    const byNormKey = new Map<string, Contact>();
+
+    const PAGE = 500;
+    for (let i = 0; i < orderedNormKeys.length; i += PAGE) {
+      const slice = orderedNormKeys.slice(i, i + PAGE);
+      const { data: existing, error: lookupErr } = await supabase
+        .from('contacts')
+        .select('*')
+        .eq('account_id', accountId)
+        .in('phone_normalized', slice);
+
+      if (lookupErr) {
+        throw new Error(`Failed to look up CSV contacts: ${lookupErr.message}`);
+      }
+
+      for (const c of (existing ?? []) as (Contact & { phone_normalized?: string })[]) {
+        const norm = c.phone_normalized || normalizeKey(c.phone);
+        if (norm) byNormKey.set(norm, c);
+      }
     }
 
     // Insert only missing contacts
-    const missing = phones
-      .filter((p) => !byPhone.has(p))
-      .map((phone) => {
-        const row = uniqueByPhone.get(phone);
-        return {
-          user_id: user.id,
-          account_id: accountId,
-          phone,
-          name: row?.name ?? null,
-          email: row?.email ?? null,
-          company: row?.company ?? null,
-        };
-      });
+    const missingKeys = orderedNormKeys.filter((k) => !byNormKey.has(k));
+    const toInsertRows = missingKeys.map((k) => {
+      const row = uniqueByNormKey.get(k)!;
+      return {
+        user_id: user.id,
+        account_id: accountId,
+        phone: row.phone,
+        name: row.name ?? null,
+        email: row.email ?? null,
+        company: row.company ?? null,
+      };
+    });
 
     const INSERT_CHUNK = 200;
-    for (let i = 0; i < missing.length; i += INSERT_CHUNK) {
-      const chunk = missing.slice(i, i + INSERT_CHUNK);
+    for (let i = 0; i < toInsertRows.length; i += INSERT_CHUNK) {
+      const chunk = toInsertRows.slice(i, i + INSERT_CHUNK);
       const { data: inserted, error: insertErr } = await supabase
         .from('contacts')
         .insert(chunk)
         .select();
+
       if (insertErr) {
-        throw new Error(`Failed to create CSV contacts: ${insertErr.message}`);
-      }
-      for (const c of (inserted ?? []) as Contact[]) {
-        if (c.phone) byPhone.set(c.phone, c);
+        // Fallback to row-by-row insert for this chunk to handle race conditions / unique violations
+        for (const singleRow of chunk) {
+          const { data: singleData, error: singleErr } = await supabase
+            .from('contacts')
+            .insert(singleRow)
+            .select()
+            .single();
+
+          if (!singleErr && singleData) {
+            const norm = (singleData as Contact & { phone_normalized?: string }).phone_normalized || normalizeKey(singleData.phone);
+            if (norm) byNormKey.set(norm, singleData as Contact);
+          } else if (isUniqueViolation(singleErr) || singleErr) {
+            // Unique violation means contact already exists in DB! Re-fetch it so the broadcast can include it
+            const normKey = normalizeKey(singleRow.phone);
+            const { data: refetched } = await supabase
+              .from('contacts')
+              .select('*')
+              .eq('account_id', accountId)
+              .eq('phone_normalized', normKey)
+              .maybeSingle();
+
+            if (refetched) {
+              byNormKey.set(normKey, refetched as Contact);
+            }
+          }
+        }
+      } else {
+        for (const c of (inserted ?? []) as (Contact & { phone_normalized?: string })[]) {
+          const norm = c.phone_normalized || normalizeKey(c.phone);
+          if (norm) byNormKey.set(norm, c);
+        }
       }
     }
 
@@ -371,9 +415,9 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       }
 
       const customValueRows: { contact_id: string; custom_field_id: string; value: string }[] = [];
-      for (const phone of phones) {
-        const contact = byPhone.get(phone);
-        const row = uniqueByPhone.get(phone);
+      for (const normKey of orderedNormKeys) {
+        const contact = byNormKey.get(normKey);
+        const row = uniqueByNormKey.get(normKey);
         if (contact && row?.customValues) {
           Object.entries(row.customValues).forEach(([colName, val]) => {
             const key = colName.trim().toLowerCase();
@@ -400,8 +444,8 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
     }
 
     // Preserve input order so analytics roughly matches the CSV order.
-    return phones
-      .map((p) => byPhone.get(p))
+    return orderedNormKeys
+      .map((k) => byNormKey.get(k))
       .filter((c): c is Contact => Boolean(c));
   }
 
